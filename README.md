@@ -22,6 +22,16 @@ powered entirely by **real OKX exchange data** — live ticker, order book, cand
   cross-timeframe alignment, an immutable SCANNING → LOCKED → RESOLVED lock (frozen entry / SL / TP1–3),
   breakeven and profit trails, max-hold expiry and a one-bar cooldown. Cards use zero extra REST calls.
 
+## v18 upgrade — close-candle sealed signals
+
+- **Close-candle intelligence** (`lib/xau/candle-intel.ts`): every confirmed candle is scored on CLV, body, pattern
+  (engulf / pin / marubozu / break of prior high-low), delta confirmation, volume expansion and confirmed EMA side.
+- **Candle fill logic**: fair-value gaps over the last 80 closed bars with live fill %, previous-candle 50% fill,
+  and an **Ideal Entry** limit at the nearest unfilled FVG edge → signal candle 50% → 33% of risk.
+- **Signal Agreement %** = 45% closed intra-TF score + 25% close-candle score + 30% HTF-weighted cross-TF alignment.
+- **Immutable lock**: one decision per confirmed close, 8 gates must pass, structure-based stop, Entry / Ideal Entry /
+  Stop Loss / Target 1-3 deep-frozen and sealed (64-bit FNV-1a), re-verified every tick and restored across reloads.
+
 ## Architecture
 
 All market logic runs in the browser (`lib/xau/`): `engine.ts` (boot handshake, sockets, bar state

@@ -204,6 +204,13 @@ export function updateAll8ScalpTradeCards(args: {
     closed[tf] = scoreCandle({ bars, idx: ci, ema9: ind.ema9, ema20: ind.ema20, ema50: ind.ema50, atr: ind.atr14, rsi: rsiFrom(ind.avg_gain, ind.avg_loss), cf, bbo, cfg })
   }
 
+  // Resolved confirmed direction per TF: closed order-flow score first, close-candle anatomy as tiebreak.
+  const resolvedClosed = Object.fromEntries(TFS.map(tf => {
+    const c = closed[tf]
+    const dir: EvalDir = !c.ready ? 'SYNCING' : isDir(c.dir) ? c.dir : intel[tf].ready && isDir(intel[tf].dir) ? intel[tf].dir : 'NEUTRAL'
+    return [tf, { ...c, dir }]
+  })) as Record<Tf, RawEval>
+
   // Pass 2: agreement, gates and the immutable close-candle lock lifecycle.
   for (const tf of TFS) {
     const card = cards[tf]
@@ -231,8 +238,8 @@ export function updateAll8ScalpTradeCards(args: {
     const liveAgree = round(W_INTRA * liveIntra + W_CLOSE * sidePts(ci, liveDir) + W_MTF * liveMtf.pct)
 
     // Confirmed (closed-candle) agreement — the only input to the lock.
-    const closedDir: EvalDir = isDir(cev.dir) ? cev.dir : isDir(ci.dir) ? ci.dir : 'NEUTRAL'
-    const closedMtf = weightedMtf(closed, closedDir)
+    const closedDir: EvalDir = resolvedClosed[tf].dir
+    const closedMtf = weightedMtf(resolvedClosed, closedDir)
     const closedIntra = sidePts(cev, closedDir)
     const closedAgree = isDir(closedDir) ? round(W_INTRA * closedIntra + W_CLOSE * sidePts(ci, closedDir) + W_MTF * closedMtf.pct) : round(W_INTRA * cev.intra_pct)
 
@@ -276,7 +283,7 @@ export function updateAll8ScalpTradeCards(args: {
     const lv = isDir(closedDir) ? buildLevels(closedDir, closedDir === 'LONG' ? bbo.ask : bbo.bid, ind.atr14, bars, ciIdx, fill, cfg) : null
     card.preview = lv ? { entry: lv.entry, ideal: lv.ideal, ideal_source: lv.ideal_source, sl: lv.sl, tp1: lv.tp1, tp2: lv.tp2, tp3: lv.tp3 } : null
     const rsiClosed = rsiFrom(ind.avg_gain, ind.avg_loss)
-    card.gates = computeGates({ tf, d: closedDir, feed: feedStatus, ci, agree: closedAgree, cfg, aligned: closedMtf.aligned.length, wMtf: closedMtf.pct, closed, rsi: rsiClosed, cf, atr: ind.atr14, spread: spreadNow, lv })
+    card.gates = computeGates({ tf, d: closedDir, feed: feedStatus, ci, agree: closedAgree, cfg, aligned: closedMtf.aligned.length, wMtf: closedMtf.pct, closed: resolvedClosed, rsi: rsiClosed, cf, atr: ind.atr14, spread: spreadNow, lv })
     card.gates_passed = card.gates.filter(g => g.pass).length
     card.candidate_grade = isDir(closedDir) ? gradeFor(closedAgree, cfg.min_agree_pct) : null
 
@@ -326,7 +333,7 @@ export function updateAll8ScalpTradeCards(args: {
     card.locked_signal = deepFreeze<LockedSignal>({
       ...fields,
       locked_aligned_tfs: [...closedMtf.aligned],
-      locked_tf_snapshot: TFS.map(k => ({ tf: k, dir: closed[k].dir, intra_pct: closed[k].intra_pct })),
+      locked_tf_snapshot: TFS.map(k => ({ tf: k, dir: resolvedClosed[k].dir, intra_pct: closed[k].intra_pct })),
       close_snapshot: { pattern: ci.pattern, score: ci.score, clv: ci.clv, body_pct: ci.body_pct, vol_ratio: ci.vol_ratio, delta_confirm: ci.delta_confirm, open: ci.open, high: ci.high, low: ci.low, close: ci.close },
       gates: card.gates.map(g => ({ ...g })),
       seal: computeSeal(fields),
@@ -339,13 +346,13 @@ export function updateAll8ScalpTradeCards(args: {
   }
 
   const readyTfs = TFS.filter(tf => closed[tf].ready)
-  const bull = readyTfs.filter(tf => cards[tf].closed_dir === 'LONG').length
-  const bear = readyTfs.filter(tf => cards[tf].closed_dir === 'SHORT').length
+  const bull = readyTfs.filter(tf => resolvedClosed[tf].dir === 'LONG').length
+  const bear = readyTfs.filter(tf => resolvedClosed[tf].dir === 'SHORT').length
   const domDir: EvalDir = readyTfs.length === 0 ? 'SYNCING' : bull === bear ? 'NEUTRAL' : bull > bear ? 'LONG' : 'SHORT'
   return {
     global_aligned_count: Math.max(bull, bear),
     global_dir: domDir,
-    global_signal_agreement_pct: weightedMtf(Object.fromEntries(TFS.map(tf => [tf, { ...closed[tf], dir: cards[tf].closed_dir }])) as Record<Tf, RawEval>, domDir).pct,
+    global_signal_agreement_pct: weightedMtf(resolvedClosed, domDir).pct,
     bull_tfs: bull,
     bear_tfs: bear,
     ready_tfs: readyTfs.length,

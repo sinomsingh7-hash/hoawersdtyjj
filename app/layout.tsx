@@ -4,7 +4,7 @@ import './globals.css'
 
 export const metadata: Metadata = {
   title: 'Omniscient — XAUUSDT Order-Flow Scalp Terminal',
-  description: 'Pure OKX V5 order flow for XAU-USDT-SWAP: Solution A tick-exact delta, dual-WebSocket zero-polling feed, 00:00 UTC VWAP, PDH/PDL sweeps and 8 immutable Scalp Trade Cards (1m to 4H) with Signal Agreement. No API keys, no synthetic data.',
+  description: 'Pure OKX V5 order flow for XAU-USDT-SWAP: Solution A tick-exact delta, dual-WebSocket zero-polling feed, 00:00 UTC VWAP, PDH/PDL sweeps and 8 immutable close-candle sealed Scalp Signals (1m to 4H) with Entry, Ideal Entry, Stop Loss, Targets, close-candle intelligence, FVG candle-fill logic and Signal Agreement %. No API keys, no synthetic data.',
   generator: 'v0.app',
   icons: {
     icon: [
