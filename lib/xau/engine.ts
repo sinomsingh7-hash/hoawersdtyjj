@@ -173,27 +173,31 @@ export class XauEngine {
     try {
       // Step 0: sockets first; frames are queued until hydration finishes.
       this.setStep(0, 'running')
-      this.business.start()
-      this.public.start()
+      if (this.business.state === 'idle' || this.business.state === 'closed') this.business.start()
+      if (this.public.state === 'idle' || this.public.state === 'closed') this.public.start()
       this.setStep(0, 'done', 'Buffering frames in async queue')
 
       // Step 1 (t = 50ms)
       await sleep(Math.max(0, 50 - (Date.now() - t0)))
       this.setStep(1, 'running')
       const sent = Date.now()
-      const [time, instruments, oiSnap, recentTrades] = await Promise.all([
+      const [timeRes, instRes, oiRes, tradesRes] = await Promise.allSettled([
         this.get<{ ts: string }>('public/time', 'time'),
         this.get<{ instId: string; ctVal: string; tickSz: string; state: string; ctValCcy: string }>(`public/instruments?instType=SWAP&instId=${INST_ID}`, 'instruments'),
-        this.get<{ oiCcy: string; oiUsd: string; ts: string }>(`public/open-interest?instType=SWAP&instId=${INST_ID}`, 'open-interest'),
-        this.get<OkxTrade>(`market/trades?instId=${INST_ID}&limit=500`, 'trades'),
+        this.get<{ oiCcy: string; oiUsd: string; ts: string }>(`public/open-interest?instType=SWAP&instId=${INST_ID}`, 'open-interest', false),
+        this.get<OkxTrade>(`market/trades?instId=${INST_ID}&limit=500`, 'trades', false),
       ])
       const rtt = Date.now() - sent
-      this.clockOffsetMs = Number.parseInt(time[0].ts, 10) - Math.round(sent + rtt / 2)
-      const inst = instruments.find(i => i.instId === INST_ID)
-      if (!inst || !(Number.parseFloat(inst.ctVal) > 0)) throw new Error('XAU-USDT-SWAP contract specification unavailable')
-      this.ctVal = Number.parseFloat(inst.ctVal)
-      this.tickSz = Number.parseFloat(inst.tickSz)
-      if (oiSnap[0]) this.applyOi(oiSnap[0], 'rest')
+      if (timeRes.status === 'fulfilled' && timeRes.value[0]?.ts) {
+        this.clockOffsetMs = Number.parseInt(timeRes.value[0].ts, 10) - Math.round(sent + rtt / 2)
+      } else {
+        this.clockOffsetMs = 0
+      }
+      const inst = instRes.status === 'fulfilled' ? instRes.value.find(i => i.instId === INST_ID) : undefined
+      this.ctVal = inst && Number.parseFloat(inst.ctVal) > 0 ? Number.parseFloat(inst.ctVal) : 0.001
+      this.tickSz = inst && Number.parseFloat(inst.tickSz) > 0 ? Number.parseFloat(inst.tickSz) : 0.1
+      if (oiRes.status === 'fulfilled' && oiRes.value[0]) this.applyOi(oiRes.value[0], 'rest')
+      const recentTrades = tradesRes.status === 'fulfilled' ? tradesRes.value : []
       this.setStep(1, 'done', `ctVal ${this.ctVal} XAU · clock offset ${this.clockOffsetMs}ms`)
 
       // Step 2 (t = 300ms)
@@ -230,15 +234,14 @@ export class XauEngine {
       this.error = err instanceof Error ? err.message : 'Startup failed'
       const running = this.boot.findIndex(s => s.status === 'running')
       if (running >= 0) this.setStep(running, 'error', this.error)
-      if (!this.stopped) setTimeout(() => { if (!this.stopped && !this.hydrated) { this.error = null; this.boot.forEach((_, i) => { if (i > 0) this.boot[i] = { ...this.boot[i], status: 'pending', detail: undefined } }); void this.retryBoot() } }, 5000)
+      if (!this.stopped) setTimeout(() => { if (!this.stopped && !this.hydrated) { this.error = null; this.boot.forEach((_, i) => { if (i > 0) this.boot[i] = { ...this.boot[i], status: 'pending', detail: undefined } }); void this.retryBoot() } }, 3000)
     }
     this.scheduleEmit()
   }
 
   private async retryBoot() {
-    // Sockets are already open and buffering; rerun REST hydration only.
-    this.business.stop(); this.public.stop()
-    this.queue = []
+    // Keep healthy sockets open and buffering; rerun REST hydration only.
+    if (this.queue.length > 4000) this.queue = this.queue.slice(-4000)
     await this.runBoot()
   }
 
@@ -246,13 +249,21 @@ export class XauEngine {
   private async fetchCandles(tf: Tf) {
     const batches: XBar[][] = []
     let after = ''
-    for (const step of FETCH_PLAN[tf]) {
+    for (let i = 0; i < FETCH_PLAN[tf].length; i++) {
+      const step = FETCH_PLAN[tf][i]
       const path = `market/${step.endpoint}?instId=${INST_ID}&bar=${OKX_BAR[tf]}&limit=${step.limit}${after ? `&after=${after}` : ''}`
-      const rows = await this.get<CandleRow>(path, step.endpoint)
-      if (!rows.length) break
-      const batch = rows.slice().reverse().map(r => parseRow(r, TF_MS[tf])).filter((b): b is XBar => b !== null)
-      batches.push(batch)
-      after = String(batch[0].ts)
+      try {
+        const rows = await this.get<CandleRow>(path, step.endpoint, i === 0)
+        if (!rows.length) break
+        const batch = rows.slice().reverse().map(r => parseRow(r, TF_MS[tf])).filter((b): b is XBar => b !== null)
+        if (!batch.length) break
+        batches.push(batch)
+        after = String(batch[0].ts)
+      } catch (err) {
+        // First page of candles is required; deeper historical pagination is best-effort.
+        if (batches.length === 0) throw err
+        break
+      }
     }
     return mergeBatches(batches.reverse()).slice(-MAX_BUFFER[tf])
   }
@@ -262,10 +273,14 @@ export class XauEngine {
     const out: OkxTrade[] = []
     let oldest = recent.reduce((min, t) => Math.min(min, Number.parseInt(t.tradeId, 10)), Number.POSITIVE_INFINITY)
     for (let page = 0; page < 5 && Number.isFinite(oldest); page++) {
-      const rows = await this.get<OkxTrade>(`market/history-trades?instId=${INST_ID}&type=1&after=${oldest}&limit=100`, 'history-trades')
-      if (!rows.length) break
-      out.push(...rows)
-      oldest = rows.reduce((min, t) => Math.min(min, Number.parseInt(t.tradeId, 10)), oldest)
+      try {
+        const rows = await this.get<OkxTrade>(`market/history-trades?instId=${INST_ID}&type=1&after=${oldest}&limit=100`, 'history-trades', false)
+        if (!rows.length) break
+        out.push(...rows)
+        oldest = rows.reduce((min, t) => Math.min(min, Number.parseInt(t.tradeId, 10)), oldest)
+      } catch {
+        break
+      }
     }
     return out
   }
@@ -366,7 +381,11 @@ export class XauEngine {
   // ───────────────────────────── frame routing ─────────────────────────────
 
   private onFrame(data: string) {
-    if (!this.hydrated) { this.queue.push(data); return }
+    if (!this.hydrated) {
+      if (this.queue.length >= 4000) this.queue.shift()
+      this.queue.push(data)
+      return
+    }
     this.dispatch(data)
   }
 
