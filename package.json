@@ -4,7 +4,7 @@
   "private": true,
   "packageManager": "pnpm@12.3.4",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node -e \"try{require.resolve('lightweight-charts')}catch{require('child_process').execSync('pnpm install --frozen-lockfile',{stdio:'inherit'})}\" && next dev",
     "build": "next build",
     "start": "next start"
   },
